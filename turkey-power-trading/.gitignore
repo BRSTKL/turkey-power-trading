@@ -1,0 +1,26 @@
+# Credentials — never commit
+.env
+
+# Data files — too large for git
+data/raw/
+data/processed/
+*.parquet
+*.csv
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Power BI (binary, use LFS if needed)
+*.pbix
+
+# OS
+.DS_Store
+Thumbs.db
