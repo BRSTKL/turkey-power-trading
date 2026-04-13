@@ -16,8 +16,8 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install eptr2
-        run: pip install eptr2
+      - name: Install dependencies
+        run: pip install eptr2 pandas
 
       - name: Test EPİAŞ API via eptr2
         env:
@@ -26,47 +26,38 @@ jobs:
         run: |
           python << 'PYEOF'
           import os
+          import pandas as pd
           from eptr2 import EPTR2
-
-          print("=== EPİAŞ API Test (eptr2) ===")
 
           eptr = EPTR2(
               username=os.environ["EPTR_USERNAME"],
               password=os.environ["EPTR_PASSWORD"]
           )
 
-          # GÖP MCP (PTF)
-          print("\n1. GÖP MCP (PTF) test...")
-          try:
-              res = eptr.call("mcp", start_date="2026-04-10", end_date="2026-04-12")
-              print(f"   BASARILI! Tip: {type(res)}")
-              print(f"   Sonuc: {str(res)[:300]}")
-          except Exception as e:
-              print(f"   HATA: {e}")
+          # Tüm call listesini al
+          calls = eptr.get_available_calls()
+          all_calls = list(calls)
+          print(f"Toplam call sayisi: {len(all_calls)}")
+          print("\nTUM CALL LISTESI:")
+          for c in sorted(all_calls):
+              print(f"  {c}")
 
-          # DGP SMP
-          print("\n2. DGP SMP test...")
-          try:
-              res = eptr.call("smp", start_date="2026-04-10", end_date="2026-04-12")
-              print(f"   BASARILI! {str(res)[:200]}")
-          except Exception as e:
-              print(f"   HATA: {e}")
+          # Üretim ile ilgili olanları filtrele
+          print("\n--- URETIM ile ilgili ---")
+          for c in sorted(all_calls):
+              if any(k in c.lower() for k in ["gen", "uretim", "realtime", "production", "uevm"]):
+                  print(f"  {c}")
 
-          # Üretim
-          print("\n3. Uretim test...")
-          try:
-              res = eptr.call("realtimegeneration", start_date="2026-04-10", end_date="2026-04-12")
-              print(f"   BASARILI! {str(res)[:200]}")
-          except Exception as e:
-              print(f"   HATA: {e}")
+          # Tüketim ile ilgili
+          print("\n--- TUKETIM ile ilgili ---")
+          for c in sorted(all_calls):
+              if any(k in c.lower() for k in ["consumption", "tuketim", "load", "demand"]):
+                  print(f"  {c}")
 
-          # Mevcut call listesi
-          print("\n4. Mevcut call'lar (ilk 20)...")
-          try:
-              calls = eptr.get_available_calls()
-              print(f"   {list(calls)[:20]}")
-          except Exception as e:
-              print(f"   HATA: {e}")
+          # Dengesizlik ile ilgili
+          print("\n--- DENGESIZLIK ile ilgili ---")
+          for c in sorted(all_calls):
+              if any(k in c.lower() for k in ["imbalance", "dengesiz", "bpm", "direction", "system"]):
+                  print(f"  {c}")
 
-          print("\n=== Test tamamlandi ===")
           PYEOF
