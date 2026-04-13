@@ -16,76 +16,57 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install requests python-dotenv
+      - name: Install eptr2
+        run: pip install eptr2
 
-      - name: Test EPİAŞ API connection
+      - name: Test EPİAŞ API via eptr2
         env:
-          EPIAS_USERNAME: ${{ secrets.EPIAS_USERNAME }}
-          EPIAS_PASSWORD: ${{ secrets.EPIAS_PASSWORD }}
+          EPTR_USERNAME: ${{ secrets.EPIAS_USERNAME }}
+          EPTR_PASSWORD: ${{ secrets.EPIAS_PASSWORD }}
         run: |
           python << 'PYEOF'
-          import requests, os
-          from datetime import datetime, timedelta
+          import os
+          from eptr2 import EPTR2
 
-          USERNAME = os.environ['EPIAS_USERNAME']
-          PASSWORD = os.environ['EPIAS_PASSWORD']
+          print("=== EPİAŞ API Test (eptr2) ===")
 
-          print('=== EPİAŞ API Test ===')
-          print(f'User: {USERNAME[:5]}***')
-
-          # Step 1: TGT al
-          r1 = requests.post(
-              'https://giris.epias.com.tr/cas/v1/tickets',
-              headers={'Content-Type': 'application/x-www-form-urlencoded'},
-              data={'username': USERNAME, 'password': PASSWORD},
-              timeout=15
+          eptr = EPTR2(
+              username=os.environ["EPTR_USERNAME"],
+              password=os.environ["EPTR_PASSWORD"]
           )
-          print(f'Auth status: {r1.status_code}')
-          if r1.status_code != 201:
-              print(f'Auth HATA: {r1.text}')
-              exit(1)
 
-          tgt_url = r1.headers.get('Location', '')
-          print(f'TGT URL: {tgt_url[:60]}')
+          # GÖP MCP (PTF)
+          print("\n1. GÖP MCP (PTF) test...")
+          try:
+              res = eptr.call("mcp", start_date="2026-04-10", end_date="2026-04-12")
+              print(f"   BASARILI! Tip: {type(res)}")
+              print(f"   Sonuc: {str(res)[:300]}")
+          except Exception as e:
+              print(f"   HATA: {e}")
 
-          # Step 2: ST al
-          r2 = requests.post(
-              tgt_url,
-              headers={'Content-Type': 'application/x-www-form-urlencoded'},
-              data={'service': 'https://seffaflik.epias.com.tr'},
-              timeout=15
-          )
-          token = r2.text.strip()
-          print(f'Token: {token[:30]}...')
-          print(f'Token uzunlugu: {len(token)}')
+          # DGP SMP
+          print("\n2. DGP SMP test...")
+          try:
+              res = eptr.call("smp", start_date="2026-04-10", end_date="2026-04-12")
+              print(f"   BASARILI! {str(res)[:200]}")
+          except Exception as e:
+              print(f"   HATA: {e}")
 
-          end   = datetime.today().strftime('%Y-%m-%dT23:00:00+03:00')
-          start = (datetime.today() - timedelta(days=2)).strftime('%Y-%m-%dT00:00:00+03:00')
-          payload = {'startDate': start, 'endDate': end}
+          # Üretim
+          print("\n3. Uretim test...")
+          try:
+              res = eptr.call("realtimegeneration", start_date="2026-04-10", end_date="2026-04-12")
+              print(f"   BASARILI! {str(res)[:200]}")
+          except Exception as e:
+              print(f"   HATA: {e}")
 
-          print(f'\nTarih araligi: {start} -> {end}')
+          # Mevcut call listesi
+          print("\n4. Mevcut call'lar (ilk 20)...")
+          try:
+              calls = eptr.get_available_calls()
+              print(f"   {list(calls)[:20]}")
+          except Exception as e:
+              print(f"   HATA: {e}")
 
-          # 4 farklı header kombinasyonu dene
-          variants = [
-              ('TGT',           {'TGT': token, 'Content-Type': 'application/json'}),
-              ('Authorization Bearer', {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}),
-              ('Authorization raw',    {'Authorization': token, 'Content-Type': 'application/json'}),
-              ('ticket',        {'ticket': token, 'Content-Type': 'application/json'}),
-          ]
-
-          url = 'https://seffaflik.epias.com.tr/electricity-service/v1/markets/dam/data/mcp'
-
-          for name, headers in variants:
-              r = requests.post(url, headers=headers, json=payload, timeout=30)
-              print(f'\nHeader [{name}]: status={r.status_code}')
-              print(f'  Response: {r.text[:300]}')
-              if r.status_code == 200:
-                  try:
-                      items = r.json().get('items', [])
-                      print(f'  BASARILI! {len(items)} kayit')
-                      if items:
-                          print(f'  Ornek: {items[0]}')
-                  except Exception as e:
-                      print(f'  JSON parse hatasi: {e}')
+          print("\n=== Test tamamlandi ===")
           PYEOF
