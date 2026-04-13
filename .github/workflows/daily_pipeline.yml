@@ -1,0 +1,84 @@
+name: Daily Data Pipeline
+
+on:
+  schedule:
+    # Her gün 06:00 UTC = 09:00 Türkiye saati
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    # Manuel tetikleme — GitHub UI'dan "Run workflow" butonu
+    inputs:
+      days_back:
+        description: 'Kaç gün geriye gidilsin?'
+        required: false
+        default: '3'
+
+jobs:
+  fetch-data:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env file
+        run: |
+          echo "EPIAS_USERNAME=${{ secrets.EPIAS_USERNAME }}" >> .env
+          echo "EPIAS_PASSWORD=${{ secrets.EPIAS_PASSWORD }}" >> .env
+
+      - name: Create data directories
+        run: |
+          mkdir -p data/raw
+          mkdir -p data/processed
+
+      - name: Run GÖP MCP pipeline
+        run: python -m fetch.epias_gop
+        continue-on-error: true
+
+      - name: Run DGP pipeline
+        run: python -m fetch.epias_dgp
+        continue-on-error: true
+
+      - name: Run Üretim pipeline
+        run: python -m fetch.epias_uretim
+        continue-on-error: true
+
+      - name: Run indicators
+        run: |
+          python -c "
+          import glob, os
+          from process.indicators import run_all
+          gop_files = sorted(glob.glob('data/processed/gop_mcp_*.csv'))
+          dgp_files = sorted(glob.glob('data/processed/dgp_*.csv'))
+          if gop_files and dgp_files:
+              run_all(gop_files[-1], dgp_files[-1])
+              print('Indicators OK')
+          else:
+              print('No processed files found, skipping indicators')
+          "
+        continue-on-error: true
+
+      - name: Upload processed data as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: processed-data-${{ github.run_number }}
+          path: data/processed/
+          retention-days: 30
+
+      - name: Commit and push data
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add data/processed/ || true
+          git diff --staged --quiet || git commit -m "data: daily update $(date +'%Y-%m-%d')"
+          git push || true

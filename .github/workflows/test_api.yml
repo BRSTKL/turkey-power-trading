@@ -1,0 +1,92 @@
+name: API Connection Test
+
+on:
+  workflow_dispatch:
+    # Sadece manuel tetikleme — "Run workflow" ile çalıştır
+
+jobs:
+  test-api:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests loguru python-dotenv
+
+      - name: Create .env file
+        run: |
+          echo "EPIAS_USERNAME=${{ secrets.EPIAS_USERNAME }}" >> .env
+          echo "EPIAS_PASSWORD=${{ secrets.EPIAS_PASSWORD }}" >> .env
+
+      - name: Test EPİAŞ API connection
+        run: |
+          python -c "
+          import requests, os
+          from datetime import datetime, timedelta
+          from dotenv import load_dotenv
+          load_dotenv()
+
+          USERNAME = os.getenv('EPIAS_USERNAME')
+          PASSWORD = os.getenv('EPIAS_PASSWORD')
+
+          print('=== EPİAŞ API Test ===')
+          print(f'User: {USERNAME}')
+
+          # Auth
+          r1 = requests.post(
+              'https://giris.epias.com.tr/cas/v1/tickets',
+              headers={'Content-Type': 'application/x-www-form-urlencoded'},
+              data={'username': USERNAME, 'password': PASSWORD},
+              timeout=15
+          )
+          print(f'Auth status: {r1.status_code}')
+          assert r1.status_code == 201, f'Auth failed: {r1.text}'
+
+          tgt_url = r1.headers.get('Location', '')
+          r2 = requests.post(
+              tgt_url,
+              headers={'Content-Type': 'application/x-www-form-urlencoded'},
+              data={'service': 'https://seffaflik.epias.com.tr'},
+              timeout=15
+          )
+          token = r2.text.strip()
+          print(f'Token OK: {token[:20]}...')
+
+          headers = {'TGT': token, 'Content-Type': 'application/json'}
+          end   = datetime.today().strftime('%Y-%m-%dT23:00:00+03:00')
+          start = (datetime.today() - timedelta(days=2)).strftime('%Y-%m-%dT00:00:00+03:00')
+
+          # GÖP
+          r3 = requests.post(
+              'https://seffaflik.epias.com.tr/electricity-service/v1/markets/dam/data/mcp',
+              headers=headers, json={'startDate': start, 'endDate': end}, timeout=30
+          )
+          items = r3.json().get('items', [])
+          print(f'GÖP MCP: {r3.status_code} — {len(items)} kayıt')
+          if items: print(f'  Örnek: {items[0]}')
+
+          # DGP
+          r4 = requests.post(
+              'https://seffaflik.epias.com.tr/electricity-service/v1/markets/bpm/data/bpm-up-instruction',
+              headers=headers, json={'startDate': start, 'endDate': end}, timeout=30
+          )
+          print(f'DGP UP:  {r4.status_code} — {len(r4.json().get(\"items\", []))} kayıt')
+
+          # Üretim
+          r5 = requests.post(
+              'https://seffaflik.epias.com.tr/electricity-service/v1/generation/data/realtime-generation',
+              headers=headers, json={'startDate': start, 'endDate': end}, timeout=30
+          )
+          items5 = r5.json().get('items', [])
+          print(f'Üretim:  {r5.status_code} — {len(items5)} kayıt')
+          if items5: print(f'  Sütunlar: {list(items5[0].keys())}')
+
+          print('=== Test Tamamlandı ===')
+          "
