@@ -2,15 +2,13 @@ name: Daily Data Pipeline
 
 on:
   schedule:
-    # Her gün 06:00 UTC = 09:00 Türkiye saati
     - cron: '0 6 * * *'
   workflow_dispatch:
-    # Manuel tetikleme — GitHub UI'dan "Run workflow" butonu
     inputs:
       days_back:
         description: 'Kaç gün geriye gidilsin?'
         required: false
-        default: '3'
+        default: '7'
 
 jobs:
   fetch-data:
@@ -31,49 +29,72 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Create .env file
-        run: |
-          echo "EPIAS_USERNAME=${{ secrets.EPIAS_USERNAME }}" >> .env
-          echo "EPIAS_PASSWORD=${{ secrets.EPIAS_PASSWORD }}" >> .env
-
       - name: Create data directories
+        run: mkdir -p data/raw data/processed
+
+      - name: Run full pipeline
+        env:
+          EPIAS_USERNAME: ${{ secrets.EPIAS_USERNAME }}
+          EPIAS_PASSWORD: ${{ secrets.EPIAS_PASSWORD }}
         run: |
-          mkdir -p data/raw
-          mkdir -p data/processed
+          python << 'PYEOF'
+          import os
+          from datetime import datetime, timedelta
+          from eptr2 import EPTR2
+          import pandas as pd
+          from pathlib import Path
 
-      - name: Run GÖP MCP pipeline
-        run: python -m fetch.epias_gop
-        continue-on-error: true
+          PROCESSED = Path("data/processed")
+          USERNAME = os.environ["EPIAS_USERNAME"]
+          PASSWORD = os.environ["EPIAS_PASSWORD"]
+          DAYS = int(os.environ.get("DAYS_BACK", "7"))
 
-      - name: Run DGP pipeline
-        run: python -m fetch.epias_dgp
-        continue-on-error: true
+          end_date   = datetime.today().strftime("%Y-%m-%d")
+          start_date = (datetime.today() - timedelta(days=DAYS)).strftime("%Y-%m-%d")
 
-      - name: Run Üretim pipeline
-        run: python -m fetch.epias_uretim
-        continue-on-error: true
+          print(f"Pipeline: {start_date} → {end_date}")
 
-      - name: Run indicators
-        run: |
-          python -c "
-          import glob, os
-          from process.indicators import run_all
-          gop_files = sorted(glob.glob('data/processed/gop_mcp_*.csv'))
-          dgp_files = sorted(glob.glob('data/processed/dgp_*.csv'))
-          if gop_files and dgp_files:
-              run_all(gop_files[-1], dgp_files[-1])
-              print('Indicators OK')
-          else:
-              print('No processed files found, skipping indicators')
-          "
-        continue-on-error: true
+          eptr = EPTR2(username=USERNAME, password=PASSWORD)
 
-      - name: Upload processed data as artifact
+          # 1. GÖP MCP
+          print("\n[1/3] GÖP MCP...")
+          try:
+              res = eptr.call("mcp", start_date=start_date, end_date=end_date)
+              df = res if isinstance(res, pd.DataFrame) else pd.DataFrame(res)
+              df.to_csv(PROCESSED / f"gop_mcp_{start_date.replace('-','')}.csv", index=False, encoding="utf-8-sig")
+              print(f"  OK: {len(df)} kayit")
+          except Exception as e:
+              print(f"  HATA: {e}")
+
+          # 2. DGP SMP
+          print("\n[2/3] DGP SMP...")
+          try:
+              res = eptr.call("smp", start_date=start_date, end_date=end_date)
+              df = res if isinstance(res, pd.DataFrame) else pd.DataFrame(res)
+              df.to_csv(PROCESSED / f"dgp_{start_date.replace('-','')}.csv", index=False, encoding="utf-8-sig")
+              print(f"  OK: {len(df)} kayit")
+          except Exception as e:
+              print(f"  HATA: {e}")
+
+          # 3. Üretim
+          print("\n[3/3] Uretim...")
+          try:
+              res = eptr.call("realtimegeneration", start_date=start_date, end_date=end_date)
+              df = res if isinstance(res, pd.DataFrame) else pd.DataFrame(res)
+              df.to_csv(PROCESSED / f"uretim_{start_date.replace('-','')}.csv", index=False, encoding="utf-8-sig")
+              print(f"  OK: {len(df)} kayit")
+          except Exception as e:
+              print(f"  HATA: {e}")
+
+          print("\nPipeline tamamlandi!")
+          PYEOF
+
+      - name: Upload data as artifact
         uses: actions/upload-artifact@v4
         with:
           name: processed-data-${{ github.run_number }}
           path: data/processed/
-          retention-days: 30
+          retention-days: 90
 
       - name: Commit and push data
         run: |
