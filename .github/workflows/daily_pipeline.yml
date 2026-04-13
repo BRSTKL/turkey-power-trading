@@ -40,6 +40,7 @@ jobs:
         run: |
           python << 'PYEOF'
           import os
+          import time
           import pandas as pd
           from datetime import datetime, timedelta
           from pathlib import Path
@@ -49,7 +50,6 @@ jobs:
           DAYS = int(os.environ.get("DAYS_BACK", "7"))
           end_date   = datetime.today().strftime("%Y-%m-%d")
           start_date = (datetime.today() - timedelta(days=DAYS)).strftime("%Y-%m-%d")
-          tag = start_date.replace("-", "")
 
           print(f"=== Pipeline: {start_date} → {end_date} ({DAYS} gün) ===\n")
 
@@ -58,63 +58,87 @@ jobs:
               password=os.environ["EPIAS_PASSWORD"]
           )
 
-          def fetch_and_save(call_name, filename, label):
+          def fetch_and_append(call_name, master_file, label, retries=2):
+              """Veriyi çek, master CSV'ye append et (duplicate'leri temizle)."""
               print(f"[{label}] {call_name}...")
-              try:
-                  res = eptr.call(call_name, start_date=start_date, end_date=end_date)
-                  df = res if isinstance(res, pd.DataFrame) else pd.DataFrame(res.get("items", res))
-                  df.to_csv(PROCESSED / filename, index=False, encoding="utf-8-sig")
-                  print(f"  OK: {len(df)} kayit → {filename}")
-                  return df
-              except Exception as e:
-                  print(f"  HATA: {e}")
-                  return None
+              for attempt in range(retries):
+                  try:
+                      res = eptr.call(call_name, start_date=start_date, end_date=end_date)
+                      df_new = res if isinstance(res, pd.DataFrame) else pd.DataFrame(res.get("items", res))
+                      if df_new.empty:
+                          print(f"  UYARI: Boş veri döndü")
+                          return None
+                      # Master dosya varsa merge et
+                      master_path = PROCESSED / master_file
+                      if master_path.exists():
+                          df_old = pd.read_csv(master_path)
+                          df_combined = pd.concat([df_old, df_new], ignore_index=True)
+                          # İlk sütunu date key olarak kullan, duplicate temizle
+                          date_col = df_combined.columns[0]
+                          df_combined = df_combined.drop_duplicates(subset=[date_col], keep="last")
+                          df_combined = df_combined.sort_values(date_col).reset_index(drop=True)
+                      else:
+                          df_combined = df_new
+                      df_combined.to_csv(master_path, index=False, encoding="utf-8-sig")
+                      print(f"  OK: {len(df_new)} yeni kayıt | Toplam: {len(df_combined)} → {master_file}")
+                      return df_combined
+                  except Exception as e:
+                      if attempt < retries - 1:
+                          print(f"  Deneme {attempt+1} başarısız, tekrar deneniyor... ({e})")
+                          time.sleep(10)
+                      else:
+                          print(f"  HATA: {e}")
+                          return None
 
-          # 1. GÖP MCP
-          fetch_and_save("mcp", f"gop_mcp_{tag}.csv", "1/7 GÖP MCP")
+          # 1. GÖP MCP — ana fiyat
+          fetch_and_append("mcp", "master_gop_mcp.csv", "1/8 GÖP MCP")
 
-          # 2. DGP SMP + yön
-          fetch_and_save("smp", f"dgp_smp_{tag}.csv", "2/7 DGP SMP")
-          fetch_and_save("smp-dir", f"dgp_smp_dir_{tag}.csv", "3/7 DGP Yön")
+          # 2. DGP SMP + sistem yönü
+          fetch_and_append("smp",     "master_dgp_smp.csv",     "2/8 DGP SMP")
+          fetch_and_append("smp-dir", "master_dgp_smp_dir.csv", "3/8 DGP Yön")
 
-          # 3. GÖP+DGP+İmbalance birleşik
-          fetch_and_save("mcp-smp-imb", f"mcp_smp_imb_{tag}.csv", "4/7 MCP-SMP-İmbalance")
+          # 3. MCP + SMP + İmbalance birleşik (Power BI ana tablosu)
+          fetch_and_append("mcp-smp-imb", "master_mcp_smp_imb.csv", "4/8 MCP-SMP-İmb (Ana Tablo)")
 
-          # 4. Gerçekleşen üretim (kaynak bazlı)
-          fetch_and_save("uevm", f"uretim_uevm_{tag}.csv", "5/7 UEVM Üretim")
+          # 4. Üretim — rt-gen dene, olmadı ren-rt-gen
+          result = fetch_and_append("rt-gen", "master_uretim.csv", "5/8 Üretim (rt-gen)")
+          if result is None:
+              fetch_and_append("ren-rt-gen", "master_uretim.csv", "5/8 Üretim (ren-rt-gen)")
 
-          # 5. Gerçek zamanlı tüketim
-          fetch_and_save("rt-cons", f"tuketim_{tag}.csv", "6/7 Tüketim")
+          # 5. Tüketim
+          fetch_and_append("rt-cons", "master_tuketim.csv", "6/8 Tüketim")
 
-          # 6. BPM talimatları
-          fetch_and_save("bpm-up",   f"bpm_up_{tag}.csv",   "7a/7 BPM Yük Alma")
-          fetch_and_save("bpm-down", f"bpm_down_{tag}.csv", "7b/7 BPM Yük Atma")
+          # 6. BPM talimatları (retry ile)
+          fetch_and_append("bpm-up",   "master_bpm_up.csv",   "7/8 BPM Yük Alma")
+          fetch_and_append("bpm-down", "master_bpm_down.csv", "7/8 BPM Yük Atma")
 
-          # 7. İmbalance miktarı
-          fetch_and_save("imb-qty", f"imbalance_{tag}.csv", "7c/7 İmbalance Miktarı")
+          # 7. İmbalance — imb-vol dene
+          result = fetch_and_append("imb-vol", "master_imbalance.csv", "8/8 İmbalance (imb-vol)")
+          if result is None:
+              fetch_and_append("imb-qty-g", "master_imbalance.csv", "8/8 İmbalance (imb-qty-g)")
 
-          # 8. Rüzgar tahmini (bonus)
-          fetch_and_save("wind-forecast", f"wind_forecast_{tag}.csv", "BONUS Rüzgar Tahmini")
+          # 8. Rüzgar tahmini
+          fetch_and_append("wind-forecast", "master_wind_forecast.csv", "BONUS Rüzgar")
 
-          # Master tablo: tüm CSV'leri listele
-          files = list(PROCESSED.glob("*.csv"))
-          print(f"\n=== Tamamlandi! {len(files)} dosya üretildi ===")
+          # Özet
+          files = list(PROCESSED.glob("master_*.csv"))
+          print(f"\n=== Tamamlandı! {len(files)} master dosya ===")
           for f in sorted(files):
-              size = f.stat().st_size / 1024
-              print(f"  {f.name} ({size:.1f} KB)")
+              df = pd.read_csv(f)
+              print(f"  {f.name}: {len(df)} toplam kayıt")
           PYEOF
 
       - name: Upload data as artifact
         uses: actions/upload-artifact@v4
         with:
           name: processed-data-${{ github.run_number }}
-          path: data/processed/
+          path: data/processed/master_*.csv
           retention-days: 90
 
-      - name: Commit and push data
+      - name: Commit and push master data
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add data/processed/ || true
+          git add data/processed/master_*.csv || true
           git diff --staged --quiet || git commit -m "data: daily update $(date +'%Y-%m-%d')"
           git push || true
