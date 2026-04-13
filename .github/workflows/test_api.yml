@@ -2,7 +2,6 @@ name: API Connection Test
 
 on:
   workflow_dispatch:
-    # Sadece manuel tetikleme — "Run workflow" ile çalıştır
 
 jobs:
   test-api:
@@ -18,28 +17,24 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests loguru python-dotenv
-
-      - name: Create .env file
-        run: |
-          echo "EPIAS_USERNAME=${{ secrets.EPIAS_USERNAME }}" >> .env
-          echo "EPIAS_PASSWORD=${{ secrets.EPIAS_PASSWORD }}" >> .env
+        run: pip install requests python-dotenv
 
       - name: Test EPİAŞ API connection
+        env:
+          EPIAS_USERNAME: ${{ secrets.EPIAS_USERNAME }}
+          EPIAS_PASSWORD: ${{ secrets.EPIAS_PASSWORD }}
         run: |
-          python -c "
+          python << 'PYEOF'
           import requests, os
           from datetime import datetime, timedelta
-          from dotenv import load_dotenv
-          load_dotenv()
 
-          USERNAME = os.getenv('EPIAS_USERNAME')
-          PASSWORD = os.getenv('EPIAS_PASSWORD')
+          USERNAME = os.environ['EPIAS_USERNAME']
+          PASSWORD = os.environ['EPIAS_PASSWORD']
 
           print('=== EPİAŞ API Test ===')
-          print(f'User: {USERNAME}')
+          print(f'User: {USERNAME[:5]}***')
 
-          # Auth
+          # Step 1: TGT al
           r1 = requests.post(
               'https://giris.epias.com.tr/cas/v1/tickets',
               headers={'Content-Type': 'application/x-www-form-urlencoded'},
@@ -47,9 +42,14 @@ jobs:
               timeout=15
           )
           print(f'Auth status: {r1.status_code}')
-          assert r1.status_code == 201, f'Auth failed: {r1.text}'
+          if r1.status_code != 201:
+              print(f'Auth HATA: {r1.text}')
+              exit(1)
 
           tgt_url = r1.headers.get('Location', '')
+          print(f'TGT URL: {tgt_url[:60]}')
+
+          # Step 2: ST al
           r2 = requests.post(
               tgt_url,
               headers={'Content-Type': 'application/x-www-form-urlencoded'},
@@ -57,36 +57,35 @@ jobs:
               timeout=15
           )
           token = r2.text.strip()
-          print(f'Token OK: {token[:20]}...')
+          print(f'Token: {token[:30]}...')
+          print(f'Token uzunlugu: {len(token)}')
 
-          headers = {'TGT': token, 'Content-Type': 'application/json'}
           end   = datetime.today().strftime('%Y-%m-%dT23:00:00+03:00')
           start = (datetime.today() - timedelta(days=2)).strftime('%Y-%m-%dT00:00:00+03:00')
+          payload = {'startDate': start, 'endDate': end}
 
-          # GÖP
-          r3 = requests.post(
-              'https://seffaflik.epias.com.tr/electricity-service/v1/markets/dam/data/mcp',
-              headers=headers, json={'startDate': start, 'endDate': end}, timeout=30
-          )
-          items = r3.json().get('items', [])
-          print(f'GÖP MCP: {r3.status_code} — {len(items)} kayıt')
-          if items: print(f'  Örnek: {items[0]}')
+          print(f'\nTarih araligi: {start} -> {end}')
 
-          # DGP
-          r4 = requests.post(
-              'https://seffaflik.epias.com.tr/electricity-service/v1/markets/bpm/data/bpm-up-instruction',
-              headers=headers, json={'startDate': start, 'endDate': end}, timeout=30
-          )
-          print(f'DGP UP:  {r4.status_code} — {len(r4.json().get(\"items\", []))} kayıt')
+          # 4 farklı header kombinasyonu dene
+          variants = [
+              ('TGT',           {'TGT': token, 'Content-Type': 'application/json'}),
+              ('Authorization Bearer', {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}),
+              ('Authorization raw',    {'Authorization': token, 'Content-Type': 'application/json'}),
+              ('ticket',        {'ticket': token, 'Content-Type': 'application/json'}),
+          ]
 
-          # Üretim
-          r5 = requests.post(
-              'https://seffaflik.epias.com.tr/electricity-service/v1/generation/data/realtime-generation',
-              headers=headers, json={'startDate': start, 'endDate': end}, timeout=30
-          )
-          items5 = r5.json().get('items', [])
-          print(f'Üretim:  {r5.status_code} — {len(items5)} kayıt')
-          if items5: print(f'  Sütunlar: {list(items5[0].keys())}')
+          url = 'https://seffaflik.epias.com.tr/electricity-service/v1/markets/dam/data/mcp'
 
-          print('=== Test Tamamlandı ===')
-          "
+          for name, headers in variants:
+              r = requests.post(url, headers=headers, json=payload, timeout=30)
+              print(f'\nHeader [{name}]: status={r.status_code}')
+              print(f'  Response: {r.text[:300]}')
+              if r.status_code == 200:
+                  try:
+                      items = r.json().get('items', [])
+                      print(f'  BASARILI! {len(items)} kayit')
+                      if items:
+                          print(f'  Ornek: {items[0]}')
+                  except Exception as e:
+                      print(f'  JSON parse hatasi: {e}')
+          PYEOF
