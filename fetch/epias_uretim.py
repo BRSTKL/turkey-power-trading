@@ -1,89 +1,63 @@
 """
-Kaynak bazlı gerçekleşen üretim verisi (UEVM).
-Hidro, doğalgaz, rüzgar, güneş, kömür, ithalat/ihracat.
+Kaynak bazlı gerçekleşen üretim (UEVM).
+eptr2 ile realtime generation verisi.
 """
 
-import json
-import requests
+import os
 import pandas as pd
-from datetime import datetime, timedelta
 from loguru import logger
+from dotenv import load_dotenv
+from eptr2 import EPTR2
 
-from config.settings import EPIAS_BASE_URL, ENDPOINTS, RAW_DIR, PROCESSED_DIR
-from fetch.epias_auth import get_token, get_headers
+from config.settings import PROCESSED_DIR
 
-
-def fetch_uretim(start_date: str, end_date: str, token: str) -> dict:
-    url = EPIAS_BASE_URL + ENDPOINTS["production"]
-    payload = {"startDate": start_date, "endDate": end_date}
-
-    logger.info(f"Üretim verisi çekiliyor: {start_date[:10]} → {end_date[:10]}")
-    response = requests.post(url, headers=get_headers(token), json=payload, timeout=30)
-
-    if response.status_code == 200:
-        data = response.json()
-        logger.success(f"Üretim verisi alındı: {len(data.get('items', []))} kayıt")
-        return data
-    else:
-        logger.error(f"Üretim hatası: {response.status_code}")
-        raise ConnectionError(f"API hatası: {response.status_code}")
+load_dotenv()
 
 
-def parse_uretim(data: dict) -> pd.DataFrame:
-    """
-    Kaynak bazlı üretimi parse eder.
+def get_client() -> EPTR2:
+    return EPTR2(
+        username=os.environ["EPIAS_USERNAME"],
+        password=os.environ["EPIAS_PASSWORD"]
+    )
 
-    Başlıca sütunlar:
-        natural_gas, wind, hydro_river, hydro_dam,
-        solar, lignite, hard_coal, geothermal,
-        biomass, naphtha, waste_heat, import_export
-    """
-    items = data.get("items", [])
-    rows = []
-    for item in items:
-        dt = pd.to_datetime(item.get("date"), utc=False)
-        row = {"datetime": dt, "date": dt.date(), "hour": dt.hour}
-        # Tüm üretim kaynaklarını al
-        for key, val in item.items():
-            if key != "date":
-                row[key] = val
-        rows.append(row)
 
-    df = pd.DataFrame(rows).sort_values("datetime").reset_index(drop=True)
+def fetch_uretim(start_date: str, end_date: str) -> pd.DataFrame:
+    """Kaynak bazlı gerçekleşen üretim."""
+    logger.info(f"Üretim verisi çekiliyor: {start_date} → {end_date}")
+    eptr = get_client()
 
-    # Türetilen göstergeler
-    renewable_cols = [c for c in df.columns if any(x in c.lower() for x in ["wind", "solar", "hydro", "geo", "bio"])]
+    res = eptr.call("realtimegeneration", start_date=start_date, end_date=end_date)
+    df = res if isinstance(res, pd.DataFrame) else pd.DataFrame(res)
+    df.columns = [c.lower() for c in df.columns]
+
+    date_col = next((c for c in df.columns if "date" in c or "tarih" in c), None)
+    if date_col:
+        df["datetime"] = pd.to_datetime(df[date_col])
+        df["date"] = df["datetime"].dt.date
+        df["hour"] = df["datetime"].dt.hour
+
+    # Yenilenebilir toplam
+    renewable_keywords = ["wind", "solar", "hydro", "geo", "bio", "ruzgar", "gunes", "hidro", "jeotermal", "biyokutle"]
+    renewable_cols = [c for c in df.columns if any(k in c for k in renewable_keywords)]
     if renewable_cols:
+        df[renewable_cols] = df[renewable_cols].apply(pd.to_numeric, errors="coerce")
         df["total_renewable"] = df[renewable_cols].sum(axis=1)
-        total_cols = [c for c in df.columns if c not in ["datetime", "date", "hour", "total_renewable"]]
-        df["total_generation"] = df[total_cols].sum(axis=1)
-        df["renewable_share_pct"] = (df["total_renewable"] / df["total_generation"].replace(0, 1)) * 100
+        numeric_cols = df.select_dtypes(include="number").columns.tolist()
+        df["total_generation"] = df[numeric_cols].sum(axis=1)
+        df["renewable_pct"] = (df["total_renewable"] / df["total_generation"].replace(0, 1)) * 100
 
-    logger.success(f"Üretim DataFrame: {len(df)} satır, {len(df.columns)} sütun")
-    return df
+    df = df.sort_values("datetime").reset_index(drop=True)
+    logger.success(f"Üretim: {len(df)} kayıt | {len(df.columns)} sütun")
 
-
-def run(start_date: str = None, end_date: str = None) -> pd.DataFrame:
-    if not start_date:
-        start_date = (datetime.today() - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00+03:00")
-    if not end_date:
-        end_date = datetime.today().strftime("%Y-%m-%dT23:00:00+03:00")
-
-    token = get_token()
-    data  = fetch_uretim(start_date, end_date, token)
-
-    date_str = start_date[:10].replace("-", "")
-    with open(RAW_DIR / f"uretim_{date_str}.json", "w") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-    df = parse_uretim(data)
-    path = PROCESSED_DIR / f"uretim_{date_str}.csv"
+    path = PROCESSED_DIR / f"uretim_{start_date.replace('-','')}.csv"
     df.to_csv(path, index=False, encoding="utf-8-sig")
-    logger.success(f"Üretim kaydedildi: {path}")
+    logger.info(f"Kaydedildi: {path}")
     return df
 
 
 if __name__ == "__main__":
-    df = run()
-    print("\n--- Üretim Son 5 Kayıt ---")
-    print(df[["datetime", "total_generation", "total_renewable", "renewable_share_pct"]].tail())
+    from datetime import datetime, timedelta
+    end   = datetime.today().strftime("%Y-%m-%d")
+    start = (datetime.today() - timedelta(days=7)).strftime("%Y-%m-%d")
+    df = fetch_uretim(start, end)
+    print(df[["datetime", "total_generation", "renewable_pct"]].tail())
